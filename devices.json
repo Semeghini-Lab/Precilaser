@@ -1,0 +1,16 @@
+{
+  "amplifiers": [
+    {
+      "name": "420: 1844 nm TDFA",
+      "port": "COM9"
+    },
+    {
+      "name": "420: 1544 nm EDFA",
+      "port": "COM12"
+    },
+    {
+      "name": "302: 1555 nm EDFA",
+      "port": "COM20"
+    }
+  ]
+}
