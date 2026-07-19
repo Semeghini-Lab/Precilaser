@@ -47,6 +47,16 @@ COLOR_OK = "#1b7f2a"
 COLOR_ERR = "#c62828"
 COLOR_DIM = "#9a9a9a"
 
+BASE_FONT_SIZE = 9
+FONT_SIZE_STEP = 1
+FONT_SIZE_MIN = 7
+FONT_SIZE_MAX = 18
+
+
+def scaled_px(base: int, font_size: int) -> int:
+    """Scale a layout pixel size with the current UI font size."""
+    return max(1, int(round(base * font_size / BASE_FONT_SIZE)))
+
 
 @dataclass
 class AmpStatus:
@@ -122,10 +132,8 @@ def has_protection_errors(system_status: int) -> bool:
 def can_set_current(status: AmpStatus) -> tuple[bool, str]:
     if not status.connected or status.last_update == 0:
         return False, "Not connected"
-    if not drivers_all_enabled(status.driver_status):
-        return False, "All drivers must be enabled"
     if has_protection_errors(status.system_status):
-        return False, "Protection fault active"
+        return False, "Interlock fault active"
     return True, ""
 
 
@@ -296,6 +304,7 @@ class FlowFrame(ttk.Frame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self._cards: list[tk.Widget] = []
+        self.card_min_width = CARD_WIDTH
         self.bind("<Configure>", self._on_configure)
 
     def add(self, widget: tk.Widget) -> None:
@@ -332,7 +341,7 @@ class FlowFrame(ttk.Frame):
 
         for card in cards:
             card.update_idletasks()
-            cw = max(card.winfo_reqwidth(), CARD_WIDTH)
+            cw = max(card.winfo_reqwidth(), self.card_min_width)
             ch = card.winfo_reqheight()
 
             if x > CARD_PAD and x + cw + CARD_PAD > width:
@@ -369,6 +378,8 @@ class AmplifierCard(ttk.LabelFrame):
         self._stage_labels: list[ttk.Label] = []
         self._stage_value_labels: list[ttk.Label] = []
         self._stage_kinds: list[str] = ["err"] * 3
+        self._heading_labels: list[ttk.Label] = []
+        self._metric_cols: list[dict] = []
         self._dim_body = False
 
         self.current_vars = [tk.StringVar(value="—") for _ in range(3)]
@@ -377,7 +388,7 @@ class AmplifierCard(ttk.LabelFrame):
         self.pd_status_vars = [tk.StringVar(value="") for _ in range(4)]
         self.temp_vars = [tk.StringVar(value="—") for _ in range(5)]
 
-        self._heading("Protection", 0)
+        self._heading("Interlocks", 0)
 
         prot = ttk.Frame(self)
         prot.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -532,14 +543,16 @@ class AmplifierCard(ttk.LabelFrame):
         self.enable_btn.grid(row=0, column=0, sticky="w")
         self._set_enable_button_color(COLOR_DIM, active=False)
 
-        self._label(
+        total_lbl = self._label(
             self.total_current_var,
             row=1,
             column=0,
             parent=controls,
-            font=("", 9, "bold"),
+            style="Heading.TLabel",
+            track=False,
             pady=(8, 0),
         )
+        self._heading_labels.append(total_lbl)
 
         entry_row = ttk.Frame(controls)
         entry_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
@@ -575,7 +588,27 @@ class AmplifierCard(ttk.LabelFrame):
         )
         col.grid_propagate(False)
         parent.columnconfigure(index, weight=0, minsize=width, uniform=uniform)
+        self._metric_cols.append(
+            {
+                "frame": col,
+                "parent": parent,
+                "index": index,
+                "base_w": width,
+                "base_h": height,
+                "uniform": uniform,
+            }
+        )
         return col
+
+    def apply_layout_scale(self, font_size: int) -> None:
+        """Grow/shrink fixed metric cells so larger fonts are not clipped."""
+        for m in self._metric_cols:
+            w = scaled_px(m["base_w"], font_size)
+            h = scaled_px(m["base_h"], font_size)
+            m["frame"].configure(width=w, height=h)
+            m["parent"].columnconfigure(
+                m["index"], weight=0, minsize=w, uniform=m["uniform"]
+            )
 
     def _label(
         self,
@@ -618,7 +651,10 @@ class AmplifierCard(ttk.LabelFrame):
         return lbl
 
     def _heading(self, text: str, row: int) -> None:
-        self._label(text, row=row, columnspan=2, font=("", 9, "bold"))
+        lbl = self._label(
+            text, row=row, columnspan=2, style="Heading.TLabel", track=False
+        )
+        self._heading_labels.append(lbl)
 
     def _row(self, label: str, var: tk.StringVar, row: int) -> None:
         self._label(label, row=row, column=0, padx=(0, 12))
@@ -739,8 +775,11 @@ class AmplifierCard(ttk.LabelFrame):
         self._dim_body = dim_body
         self.configure(style=f"{kind}.TLabelframe")
         label_style = "Dim.TLabel" if dim_body else "Live.TLabel"
+        heading_style = "HeadingDim.TLabel" if dim_body else "Heading.TLabel"
         for lbl in self._labels:
             lbl.configure(style=label_style)
+        for lbl in self._heading_labels:
+            lbl.configure(style=heading_style)
         self._apply_pd_styles()
         self._apply_prot_styles()
         self._apply_stage_styles()
@@ -797,17 +836,37 @@ class AmplifierCard(ttk.LabelFrame):
         self._set_enable_button_color(COLOR_DIM, active=False)
 
 
-def configure_styles(root: tk.Tk) -> None:
+def apply_ui_font(root: tk.Misc, size: int) -> None:
+    """Apply a uniform UI font size to ttk styles and tk buttons."""
     style = ttk.Style(root)
-    style.configure("Live.TLabel", foreground="#1a1a1a")
-    style.configure("Dim.TLabel", foreground="#9a9a9a")
-    style.configure("Connected.TLabelframe.Label", foreground="#1b7f2a")
-    style.configure("Disconnected.TLabelframe.Label", foreground="#c62828")
-    style.configure("Connecting.TLabelframe.Label", foreground="#666666")
-    style.configure("PdOk.TLabel", foreground="#1b7f2a")
-    style.configure("PdErr.TLabel", foreground="#c62828")
-    style.configure("PdOkDim.TLabel", foreground="#8a9a8a")
-    style.configure("PdErrDim.TLabel", foreground="#b09090")
+    regular = ("", size)
+    bold = ("", size, "bold")
+
+    style.configure("TLabel", font=regular)
+    style.configure("TButton", font=regular)
+    style.configure("TEntry", font=regular)
+    style.configure("TLabelframe", font=regular)
+    style.configure("TLabelframe.Label", font=regular)
+
+    style.configure("Live.TLabel", font=regular, foreground="#1a1a1a")
+    style.configure("Dim.TLabel", font=regular, foreground="#9a9a9a")
+    style.configure("Heading.TLabel", font=bold, foreground="#1a1a1a")
+    style.configure("HeadingDim.TLabel", font=bold, foreground="#9a9a9a")
+    style.configure("Connected.TLabelframe.Label", font=regular, foreground="#1b7f2a")
+    style.configure("Disconnected.TLabelframe.Label", font=regular, foreground="#c62828")
+    style.configure("Connecting.TLabelframe.Label", font=regular, foreground="#666666")
+    style.configure("PdOk.TLabel", font=regular, foreground="#1b7f2a")
+    style.configure("PdErr.TLabel", font=regular, foreground="#c62828")
+    style.configure("PdOkDim.TLabel", font=regular, foreground="#8a9a8a")
+    style.configure("PdErrDim.TLabel", font=regular, foreground="#b09090")
+
+    def _walk(widget: tk.Misc) -> None:
+        if isinstance(widget, tk.Button):
+            widget.configure(font=regular)
+        for child in widget.winfo_children():
+            _walk(child)
+
+    _walk(root)
 
 
 class App(tk.Tk):
@@ -816,7 +875,26 @@ class App(tk.Tk):
         self.title("Precilaser Amplifiers")
         self.geometry("980x720")
         self.minsize(360, 400)
-        configure_styles(self)
+        self._font_size = BASE_FONT_SIZE
+        apply_ui_font(self, self._font_size)
+
+        menubar = tk.Menu(self)
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(
+            label="Larger Text",
+            command=self._font_larger,
+            accelerator="Ctrl++",
+        )
+        view_menu.add_command(
+            label="Smaller Text",
+            command=self._font_smaller,
+            accelerator="Ctrl+-",
+        )
+        menubar.add_cascade(label="View", menu=view_menu)
+        self.config(menu=menubar)
+        self.bind_all("<Control-plus>", lambda _e: self._font_larger())
+        self.bind_all("<Control-equal>", lambda _e: self._font_larger())
+        self.bind_all("<Control-minus>", lambda _e: self._font_smaller())
 
         outer = ttk.Frame(self, padding=6)
         outer.pack(fill="both", expand=True)
@@ -865,8 +943,30 @@ class App(tk.Tk):
                 self.flow.add(card)
                 self.cards.append(card)
 
+        # Re-apply after cards exist so tk.Button fonts match ttk styles.
+        self._apply_font_size()
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(UI_POLL_MS, self._tick)
+
+    def _apply_font_size(self) -> None:
+        apply_ui_font(self, self._font_size)
+        for card in self.cards:
+            card.apply_layout_scale(self._font_size)
+        self.flow.card_min_width = scaled_px(CARD_WIDTH, self._font_size)
+        self.flow._reflow()
+
+    def _font_larger(self) -> None:
+        if self._font_size >= FONT_SIZE_MAX:
+            return
+        self._font_size += FONT_SIZE_STEP
+        self._apply_font_size()
+
+    def _font_smaller(self) -> None:
+        if self._font_size <= FONT_SIZE_MIN:
+            return
+        self._font_size -= FONT_SIZE_STEP
+        self._apply_font_size()
 
     def _tick(self) -> None:
         for card in self.cards:
