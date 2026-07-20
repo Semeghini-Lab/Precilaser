@@ -12,6 +12,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 from typing import Optional
@@ -37,8 +38,9 @@ METRIC_COL_PAD = 2
 
 CMD_ENABLE_DRIVER = 0x30
 CMD_SET_CURRENT = 0xA1
-DRIVER_ENABLE_ALL = 0x07
 DRIVER_DISABLE_ALL = 0x00
+MAX_DRIVERS = 3
+DEFAULT_DRIVERS = 3
 CMD_GAP_S = 0.25
 CURRENT_RAMP_STEP_A = 0.5
 CURRENT_RAMP_INTERVAL_S = 1.0
@@ -46,11 +48,15 @@ CURRENT_RAMP_INTERVAL_S = 1.0
 COLOR_OK = "#1b7f2a"
 COLOR_ERR = "#c62828"
 COLOR_DIM = "#9a9a9a"
+COLOR_UNUSED = "#bdbdbd"
 
 BASE_FONT_SIZE = 9
 FONT_SIZE_STEP = 1
 FONT_SIZE_MIN = 7
 FONT_SIZE_MAX = 18
+
+
+CURRENT_ENTRY_WIDTH = 7
 
 
 def scaled_px(base: int, font_size: int) -> int:
@@ -112,6 +118,18 @@ PROT_COL_HEIGHT = 20
 PROT_COL_PAD = 1
 
 
+def clamp_driver_count(value) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = DEFAULT_DRIVERS
+    return max(1, min(MAX_DRIVERS, count))
+
+
+def driver_enable_mask(driver_count: int) -> int:
+    return (1 << clamp_driver_count(driver_count)) - 1
+
+
 def protection_kind(system_status: int, bit: int) -> str:
     return "ok" if (system_status >> bit & 1) == 0 else "err"
 
@@ -121,17 +139,20 @@ def driver_stage_kind(driver_status: int, stage: int) -> str:
     return "ok" if (driver_status >> (3 + stage) & 1) else "err"
 
 
-def drivers_all_enabled(driver_status: int) -> bool:
-    return (driver_status >> 3 & 0b111) == 0b111
+def drivers_all_enabled(driver_status: int, driver_count: int) -> bool:
+    mask = driver_enable_mask(driver_count)
+    return (driver_status >> 3 & mask) == mask
 
 
 def has_protection_errors(system_status: int) -> bool:
     return any((system_status >> bit) & 1 for _name, bit in PROTECTION_FLAGS)
 
 
-def can_set_current(status: AmpStatus) -> tuple[bool, str]:
+def can_set_current(status: AmpStatus, driver_count: int) -> tuple[bool, str]:
     if not status.connected or status.last_update == 0:
         return False, "Not connected"
+    if not drivers_all_enabled(status.driver_status, driver_count):
+        return False, "All drivers must be enabled"
     if has_protection_errors(status.system_status):
         return False, "Interlock fault active"
     return True, ""
@@ -215,11 +236,12 @@ def parse_status_frame(frame: bytes) -> Optional[AmpStatus]:
 
 
 class AmplifierReader(threading.Thread):
-    def __init__(self, device_name: str, port: str, order: int):
+    def __init__(self, device_name: str, port: str, order: int, driver_count: int = DEFAULT_DRIVERS):
         super().__init__(name=f"amp-{port}", daemon=True)
         self.device_name = device_name
         self.port = port
         self.order = order
+        self.driver_count = clamp_driver_count(driver_count)
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._status = AmpStatus(error="Connecting…")
@@ -238,7 +260,7 @@ class AmplifierReader(threading.Thread):
         self._stop.set()
 
     def send_driver_enable(self, enable: bool) -> None:
-        mask = DRIVER_ENABLE_ALL if enable else DRIVER_DISABLE_ALL
+        mask = driver_enable_mask(self.driver_count) if enable else DRIVER_DISABLE_ALL
         self._tx.put(build_frame(CMD_ENABLE_DRIVER, bytes([mask])))
 
     def send_set_current(self, amps: float) -> None:
@@ -362,12 +384,13 @@ class AmplifierCard(ttk.LabelFrame):
     def __init__(self, master, reader: AmplifierReader):
         super().__init__(
             master,
-            text=f"{reader.device_name} — Connecting…",
+            text=reader.device_name,
             padding=4,
             style="Connecting.TLabelframe",
         )
         self.reader = reader
         self.order = reader.order
+        self.driver_count = reader.driver_count
         self._appearance = None
         self._labels: list[ttk.Label] = []
         self._pd_value_labels: list[ttk.Label] = []
@@ -377,12 +400,15 @@ class AmplifierCard(ttk.LabelFrame):
         self._prot_kinds: list[str] = ["ok"] * len(PROTECTION_FLAGS)
         self._stage_labels: list[ttk.Label] = []
         self._stage_value_labels: list[ttk.Label] = []
-        self._stage_kinds: list[str] = ["err"] * 3
+        self._stage_kinds: list[str] = [
+            "unused" if i >= self.driver_count else "err" for i in range(MAX_DRIVERS)
+        ]
         self._heading_labels: list[ttk.Label] = []
         self._metric_cols: list[dict] = []
         self._dim_body = False
+        self._was_live = False
 
-        self.current_vars = [tk.StringVar(value="—") for _ in range(3)]
+        self.current_vars = [tk.StringVar(value="—") for _ in range(MAX_DRIVERS)]
         self.total_current_var = tk.StringVar(value="Actual Current  —")
         self.pd_vars = [tk.StringVar(value="—") for _ in range(4)]
         self.pd_status_vars = [tk.StringVar(value="") for _ in range(4)]
@@ -449,13 +475,17 @@ class AmplifierCard(ttk.LabelFrame):
                 "stage",
                 padx=METRIC_COL_PAD,
             )
+            stage_kind = self._stage_kinds[i]
+            stage_style = (
+                "Unused.TLabel" if stage_kind == "unused" else "PdErr.TLabel"
+            )
             stage_lbl = self._label(
                 f"Stage {i + 1}",
                 row=0,
                 column=0,
                 parent=col,
                 track=False,
-                style="PdErr.TLabel",
+                style=stage_style,
             )
             self._stage_labels.append(stage_lbl)
             value_lbl = self._label(
@@ -466,7 +496,7 @@ class AmplifierCard(ttk.LabelFrame):
                 sticky="w",
                 width=5,
                 track=False,
-                style="PdErr.TLabel",
+                style=stage_style,
             )
             self._stage_value_labels.append(value_lbl)
 
@@ -556,7 +586,7 @@ class AmplifierCard(ttk.LabelFrame):
 
         entry_row = ttk.Frame(controls)
         entry_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self._label("Current [A]", row=0, column=0, parent=entry_row, padx=(0, 6))
+        self._label("Set Current [A]", row=0, column=0, parent=entry_row, padx=(0, 6))
         self.current_entry_var = tk.StringVar(value="0.0")
         self.current_entry = ttk.Entry(
             entry_row, textvariable=self.current_entry_var, width=7
@@ -609,6 +639,7 @@ class AmplifierCard(ttk.LabelFrame):
             m["parent"].columnconfigure(
                 m["index"], weight=0, minsize=w, uniform=m["uniform"]
             )
+        self.current_entry.configure(font=("", font_size), width=CURRENT_ENTRY_WIDTH)
 
     def _label(
         self,
@@ -660,6 +691,12 @@ class AmplifierCard(ttk.LabelFrame):
         self._label(label, row=row, column=0, padx=(0, 12))
         self._label(var, row=row, column=1, sticky="e")
 
+    def _log(self, message: str) -> None:
+        app = self.winfo_toplevel()
+        log_fn = getattr(app, "log", None)
+        if callable(log_fn):
+            log_fn(f"{self.reader.device_name}: {message}")
+
     def _set_enable_button_color(self, color: str, active: bool, all_on: bool = False) -> None:
         self.enable_btn.configure(
             text=("Disable Driver" if all_on else "Enable Driver"),
@@ -672,18 +709,21 @@ class AmplifierCard(ttk.LabelFrame):
     def _toggle_drivers(self) -> None:
         s = self.reader.get_status()
         if not s.connected or s.last_update == 0:
+            self._log("Enable/disable blocked — not connected")
             return
-        # Toggle from actual laser status (D3/D4/D5), not button state.
-        if drivers_all_enabled(s.driver_status):
+        # Toggle from actual laser status for configured drivers only.
+        if drivers_all_enabled(s.driver_status, self.driver_count):
             if sum(s.currents) > 0.05:
-                self._start_ramp(
-                    0.0,
-                    on_complete=lambda: self.reader.send_driver_enable(False),
-                )
+                self._log("Ramping to 0 A before disabling drivers")
+                self._start_ramp(0.0, on_complete=self._disable_after_zero)
             else:
                 self.reader.send_driver_enable(False)
         else:
             self.reader.send_driver_enable(True)
+
+    def _disable_after_zero(self) -> None:
+        self.reader.send_driver_enable(False)
+        self._log("Current near zero — drivers disabled")
 
     def _parse_current_entry(self) -> float | None:
         try:
@@ -699,13 +739,15 @@ class AmplifierCard(ttk.LabelFrame):
         if target is None:
             return
         s = self.reader.get_status()
-        ok, _reason = can_set_current(s)
+        ok, reason = can_set_current(s, self.driver_count)
         if not ok:
+            self._log(f"Current change blocked — {reason.lower()}")
             return
         self._start_ramp(target)
 
     def _start_ramp(self, target: float, on_complete=None) -> None:
         if self._ramp_thread is not None and self._ramp_thread.is_alive():
+            self._log("Ramp blocked — another ramp is already running")
             return
         self._ramp_stop.clear()
         self._ramp_thread = threading.Thread(
@@ -720,8 +762,9 @@ class AmplifierCard(ttk.LabelFrame):
         step = CURRENT_RAMP_STEP_A
         while not self._ramp_stop.is_set() and not self.reader._stop.is_set():
             s = self.reader.get_status()
-            ok, _reason = can_set_current(s)
+            ok, reason = can_set_current(s, self.driver_count)
             if not ok:
+                self._log(f"Ramp aborted — {reason.lower()}")
                 return
 
             current = sum(s.currents)
@@ -732,6 +775,8 @@ class AmplifierCard(ttk.LabelFrame):
                     s = self.reader.get_status()
                     if sum(s.currents) <= 0.05:
                         on_complete()
+                    else:
+                        self._log("Disable blocked — current still above zero")
                 return
 
             if target > current:
@@ -743,6 +788,8 @@ class AmplifierCard(ttk.LabelFrame):
             time.sleep(CURRENT_RAMP_INTERVAL_S)
 
     def _pd_status_style(self, kind: str) -> str:
+        if kind == "unused":
+            return "UnusedDim.TLabel" if self._dim_body else "Unused.TLabel"
         if self._dim_body:
             return "PdOkDim.TLabel" if kind == "ok" else "PdErrDim.TLabel"
         return "PdOk.TLabel" if kind == "ok" else "PdErr.TLabel"
@@ -784,9 +831,6 @@ class AmplifierCard(ttk.LabelFrame):
         self._apply_prot_styles()
         self._apply_stage_styles()
 
-    def _set_title(self, status: str) -> None:
-        self.configure(text=f"{self.reader.device_name} — {status}")
-
     def refresh(self) -> None:
         s = self.reader.get_status()
         now = time.time()
@@ -799,15 +843,18 @@ class AmplifierCard(ttk.LabelFrame):
         )
 
         if data_fresh:
+            self._was_live = True
             self._set_appearance("Connected", dim_body=False)
-            self._set_title("Connected")
             for i, (_name, bit) in enumerate(PROTECTION_FLAGS):
                 self._prot_kinds[i] = protection_kind(s.system_status, bit)
             self._apply_prot_styles()
-            for i in range(3):
-                self._stage_kinds[i] = driver_stage_kind(s.driver_status, i)
+            for i in range(MAX_DRIVERS):
+                if i >= self.driver_count:
+                    self._stage_kinds[i] = "unused"
+                else:
+                    self._stage_kinds[i] = driver_stage_kind(s.driver_status, i)
             self._apply_stage_styles()
-            all_on = drivers_all_enabled(s.driver_status)
+            all_on = drivers_all_enabled(s.driver_status, self.driver_count)
             self._set_enable_button_color(
                 COLOR_OK if all_on else COLOR_ERR, active=True, all_on=all_on
             )
@@ -827,12 +874,13 @@ class AmplifierCard(ttk.LabelFrame):
 
         if waiting:
             self._set_appearance("Connecting", dim_body=False)
-            self._set_title("Connecting…")
             self._set_enable_button_color(COLOR_DIM, active=False)
             return
 
+        if self._was_live:
+            self._log("No status for 3 s — marked disconnected, controls disabled")
+        self._was_live = False
         self._set_appearance("Disconnected", dim_body=True)
-        self._set_title("Disconnected")
         self._set_enable_button_color(COLOR_DIM, active=False)
 
 
@@ -845,23 +893,25 @@ def apply_ui_font(root: tk.Misc, size: int) -> None:
     style.configure("TLabel", font=regular)
     style.configure("TButton", font=regular)
     style.configure("TEntry", font=regular)
-    style.configure("TLabelframe", font=regular)
-    style.configure("TLabelframe.Label", font=regular)
+    style.configure("TLabelframe", font=bold)
+    style.configure("TLabelframe.Label", font=bold, foreground="#1a1a1a")
 
     style.configure("Live.TLabel", font=regular, foreground="#1a1a1a")
     style.configure("Dim.TLabel", font=regular, foreground="#9a9a9a")
     style.configure("Heading.TLabel", font=bold, foreground="#1a1a1a")
     style.configure("HeadingDim.TLabel", font=bold, foreground="#9a9a9a")
-    style.configure("Connected.TLabelframe.Label", font=regular, foreground="#1b7f2a")
-    style.configure("Disconnected.TLabelframe.Label", font=regular, foreground="#c62828")
-    style.configure("Connecting.TLabelframe.Label", font=regular, foreground="#666666")
+    style.configure("Connected.TLabelframe.Label", font=bold, foreground="#1a1a1a")
+    style.configure("Disconnected.TLabelframe.Label", font=bold, foreground=COLOR_DIM)
+    style.configure("Connecting.TLabelframe.Label", font=bold, foreground="#1a1a1a")
     style.configure("PdOk.TLabel", font=regular, foreground="#1b7f2a")
     style.configure("PdErr.TLabel", font=regular, foreground="#c62828")
     style.configure("PdOkDim.TLabel", font=regular, foreground="#8a9a8a")
     style.configure("PdErrDim.TLabel", font=regular, foreground="#b09090")
+    style.configure("Unused.TLabel", font=regular, foreground=COLOR_UNUSED)
+    style.configure("UnusedDim.TLabel", font=regular, foreground="#d0d0d0")
 
     def _walk(widget: tk.Misc) -> None:
-        if isinstance(widget, tk.Button):
+        if isinstance(widget, (tk.Button, tk.Text)):
             widget.configure(font=regular)
         for child in widget.winfo_children():
             _walk(child)
@@ -899,8 +949,26 @@ class App(tk.Tk):
         outer = ttk.Frame(self, padding=6)
         outer.pack(fill="both", expand=True)
 
-        canvas = tk.Canvas(outer, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        log_frame = ttk.LabelFrame(outer, text="Log", padding=4)
+        log_frame.pack(side="bottom", fill="x", pady=(6, 0))
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical")
+        self._log = tk.Text(
+            log_frame,
+            height=6,
+            wrap="word",
+            state="disabled",
+            relief="flat",
+            yscrollcommand=log_scroll.set,
+        )
+        log_scroll.configure(command=self._log.yview)
+        log_scroll.pack(side="right", fill="y")
+        self._log.pack(side="left", fill="both", expand=True)
+
+        cards_area = ttk.Frame(outer)
+        cards_area.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(cards_area, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(cards_area, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
@@ -935,7 +1003,12 @@ class App(tk.Tk):
             for index, entry in enumerate(devices):
                 name = str(entry.get("name", "Amplifier"))
                 port = str(entry.get("port", ""))
-                reader = AmplifierReader(name, port, order=index)
+                driver_count = clamp_driver_count(
+                    entry.get("current drivers", DEFAULT_DRIVERS)
+                )
+                reader = AmplifierReader(
+                    name, port, order=index, driver_count=driver_count
+                )
                 reader.start()
                 self.readers.append(reader)
 
@@ -948,6 +1021,21 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(UI_POLL_MS, self._tick)
+
+    def log(self, message: str) -> None:
+        """Append a timestamped line to the bottom log (thread-safe)."""
+
+        def _append() -> None:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            self._log.configure(state="normal")
+            self._log.insert("end", f"[{stamp}] {message}\n")
+            self._log.see("end")
+            self._log.configure(state="disabled")
+
+        if threading.current_thread() is threading.main_thread():
+            _append()
+        else:
+            self.after(0, _append)
 
     def _apply_font_size(self) -> None:
         apply_ui_font(self, self._font_size)
