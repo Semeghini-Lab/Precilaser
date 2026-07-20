@@ -557,8 +557,21 @@ class AmplifierCard(ttk.LabelFrame):
         controls = ttk.Frame(self)
         controls.grid(row=13, column=0, columnspan=2, sticky="ew")
 
+        total_row = ttk.Frame(controls)
+        total_row.grid(row=0, column=0, sticky="w")
+        total_lbl = self._label(
+            self.total_current_var,
+            row=0,
+            column=0,
+            parent=total_row,
+            style="Heading.TLabel",
+            track=False,
+            padx=(0, 10),
+        )
+        self._heading_labels.append(total_lbl)
+
         self.enable_btn = tk.Button(
-            controls,
+            total_row,
             text="Enable Driver",
             command=self._toggle_drivers,
             relief="flat",
@@ -570,22 +583,11 @@ class AmplifierCard(ttk.LabelFrame):
             disabledforeground="#eeeeee",
             cursor="hand2",
         )
-        self.enable_btn.grid(row=0, column=0, sticky="w")
+        self.enable_btn.grid(row=0, column=1, sticky="w")
         self._set_enable_button_color(COLOR_DIM, active=False)
 
-        total_lbl = self._label(
-            self.total_current_var,
-            row=1,
-            column=0,
-            parent=controls,
-            style="Heading.TLabel",
-            track=False,
-            pady=(8, 0),
-        )
-        self._heading_labels.append(total_lbl)
-
         entry_row = ttk.Frame(controls)
-        entry_row.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        entry_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
         self._label("Set Current [A]", row=0, column=0, parent=entry_row, padx=(0, 6))
         self.current_entry_var = tk.StringVar(value="0.0")
         self.current_entry = ttk.Entry(
