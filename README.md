@@ -8,17 +8,19 @@ py -3 GUI.py
 
 Requires Python 3, `pyserial`, and Tkinter.
 
-Each card shows interlocks (PD/T), stage currents, photodiodes, temperatures, and controls (enable/disable drivers, actual current, target current). Enter a target current and press **Enter** to ramp.
+![GUI screenshot](imgs/screenshot.PNG)
+
+Each card shows interlocks (PD/T), stage currents, photodiodes, temperatures, and controls (enable/disable drivers, max/actual current, target current). Enter a target and press **Enter** to ramp. Optional card border color and max-current cap come from `devices.json`.
 
 ## devices.json
-
-Each amplifier entry:
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Display name on the card |
 | `port` | yes | Serial port (e.g. `COM9`) |
-| `current drivers` | no | Number of drivers used (1–3, default **3**). Unused stages still appear but are greyed out |
+| `current drivers` | no | Drivers used (1–3, default **3**). Unused stages greyed out |
+| `color` | no | Hex color for the card border (`#RGB` / `#RRGGBB`) |
+| `max current` | no | Caps Set Current; shown as **—** if omitted |
 
 ## Safety features
 
@@ -30,6 +32,7 @@ Each amplifier entry:
 Current is never jumped in one step. Enter a target and press **Enter** to ramp:
 
 - **0.5 A** steps, **1 s** apart
+- Values above `max current` (if set) are capped
 - Blocked unless **all configured drivers** are enabled
 - Blocked if any **PD/T interlock** is faulted
 - Re-checked **before every step**; ramp aborts if drivers drop or an interlock faults
@@ -37,11 +40,11 @@ Current is never jumped in one step. Enter a target and press **Enter** to ramp:
 
 ### Disable Driver
 - If current ≈ 0 → disable immediately
-- If current > 0 → **ramp to 0 A** first (same rules as above), then disable only when current is near zero
+- If current > 0 → **ramp to 0 A** first, then disable only when near zero
 - If the ramp-to-zero fails (interlock / drivers), drivers stay enabled
 
 ### Enable Driver
-- Enables only the stages listed in `current drivers` (mask `0x01` / `0x03` / `0x07`); does not change current
+- Enables only the stages in `current drivers` (mask `0x01` / `0x03` / `0x07`); does not change current
 - Button is **green** when all configured drivers report enabled, otherwise **red**
 
 ### Other
