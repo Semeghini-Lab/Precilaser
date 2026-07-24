@@ -2,6 +2,9 @@
 
 Reads ports and friendly names from devices.json, connects to each amplifier,
 and shows streaming 0x44 status packets in a wrapping grid of cards.
+
+Optional per-amplifier "color" (#RGB / #RRGGBB) sets that card's LabelFrame border.
+Optional "max current" caps Set Current and is shown above Actual Current.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ BAUD = 115200
 DEVICES_PATH = Path(__file__).with_name("devices.json")
 CARD_WIDTH = 240
 CARD_PAD = 8
+CARD_INNER_PAD = 10
+CARD_LABEL_MARGINS = (6, 0, 6, 4)
 UI_POLL_MS = 200
 # Amps stream 0x44 continuously; treat silence longer than this as disconnected.
 STALE_TIMEOUT_S = 3.0
@@ -124,6 +129,94 @@ def clamp_driver_count(value) -> int:
     except (TypeError, ValueError):
         count = DEFAULT_DRIVERS
     return max(1, min(MAX_DRIVERS, count))
+
+
+def parse_max_current(value) -> float | None:
+    """Return a positive max current in amps, or None if missing/invalid."""
+    if value is None or value == "":
+        return None
+    try:
+        amps = float(value)
+    except (TypeError, ValueError):
+        return None
+    if amps <= 0:
+        return None
+    return amps
+
+
+def parse_hex_color(value) -> str | None:
+    """Return normalized #RRGGBB, or None if missing/invalid."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not text.startswith("#"):
+        text = f"#{text}"
+    if len(text) == 4 and all(c in "0123456789abcdefABCDEF" for c in text[1:]):
+        text = "#" + "".join(c * 2 for c in text[1:])
+    if len(text) != 7:
+        return None
+    try:
+        int(text[1:], 16)
+    except ValueError:
+        return None
+    return text
+
+
+# Optional card border colors from devices.json ("color"). Vista/xpnative
+# LabelFrames ignore bordercolor, so colored cards use a clam border element.
+_CARD_BORDER_COLORS: set[str] = set()
+_CLAM_LABELFRAME_BORDER = "ClamLabelframe.border"
+_LABELFRAME_KINDS = ("Connected", "Disconnected", "Connecting")
+
+
+def labelframe_style_name(kind: str, border_color: str | None = None) -> str:
+    if not border_color:
+        return f"{kind}.TLabelframe"
+    return f"{kind}.Border{border_color.lstrip('#').lower()}.TLabelframe"
+
+
+def ensure_card_border_styles(
+    root: tk.Misc, border_color: str, font_size: int | None = None
+) -> None:
+    """Register clam-based LabelFrame styles so border_color paints the title frame."""
+    color = parse_hex_color(border_color)
+    if not color:
+        return
+
+    style = ttk.Style(root)
+    try:
+        style.element_create(_CLAM_LABELFRAME_BORDER, "from", "clam", "Labelframe.border")
+    except tk.TclError:
+        pass
+
+    size = font_size if font_size is not None else BASE_FONT_SIZE
+    bold = ("", size, "bold")
+    label_fg = {
+        "Connected": "#1a1a1a",
+        "Disconnected": COLOR_DIM,
+        "Connecting": "#1a1a1a",
+    }
+
+    _CARD_BORDER_COLORS.add(color)
+    for kind in _LABELFRAME_KINDS:
+        name = labelframe_style_name(kind, color)
+        style.layout(name, [(_CLAM_LABELFRAME_BORDER, {"sticky": "nswe"})])
+        style.configure(
+            name,
+            bordercolor=color,
+            lightcolor=color,
+            darkcolor=color,
+            borderwidth=2,
+            relief="solid",
+            labelmargins=CARD_LABEL_MARGINS,
+        )
+        style.configure(
+            f"{name}.Label",
+            font=bold,
+            foreground=label_fg[kind],
+        )
 
 
 def driver_enable_mask(driver_count: int) -> int:
@@ -381,12 +474,22 @@ class FlowFrame(ttk.Frame):
 
 
 class AmplifierCard(ttk.LabelFrame):
-    def __init__(self, master, reader: AmplifierReader):
+    def __init__(
+        self,
+        master,
+        reader: AmplifierReader,
+        border_color: str | None = None,
+        max_current: float | None = None,
+    ):
+        self._border_color = border_color
+        self.max_current = max_current
+        if border_color:
+            ensure_card_border_styles(master, border_color)
         super().__init__(
             master,
             text=reader.device_name,
-            padding=4,
-            style="Connecting.TLabelframe",
+            padding=CARD_INNER_PAD,
+            style=labelframe_style_name("Connecting", border_color),
         )
         self.reader = reader
         self.order = reader.order
@@ -557,8 +660,25 @@ class AmplifierCard(ttk.LabelFrame):
         controls = ttk.Frame(self)
         controls.grid(row=13, column=0, columnspan=2, sticky="ew")
 
+        row = 0
+        max_text = (
+            f"Max Current  {self.max_current:.2f}"
+            if self.max_current is not None
+            else "Max Current  —"
+        )
+        max_lbl = self._label(
+            max_text,
+            row=row,
+            column=0,
+            parent=controls,
+            style="Heading.TLabel",
+            track=False,
+        )
+        self._heading_labels.append(max_lbl)
+        row += 1
+
         total_row = ttk.Frame(controls)
-        total_row.grid(row=0, column=0, sticky="w")
+        total_row.grid(row=row, column=0, sticky="w", pady=(4, 0))
         total_lbl = self._label(
             self.total_current_var,
             row=0,
@@ -587,7 +707,7 @@ class AmplifierCard(ttk.LabelFrame):
         self._set_enable_button_color(COLOR_DIM, active=False)
 
         entry_row = ttk.Frame(controls)
-        entry_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        entry_row.grid(row=row + 1, column=0, sticky="w", pady=(6, 0))
         self._label("Set Current [A]", row=0, column=0, parent=entry_row, padx=(0, 6))
         self.current_entry_var = tk.StringVar(value="0.0")
         self.current_entry = ttk.Entry(
@@ -734,6 +854,10 @@ class AmplifierCard(ttk.LabelFrame):
             return None
         if value < 0:
             return None
+        if self.max_current is not None and value > self.max_current:
+            value = self.max_current
+            self.current_entry_var.set(f"{value:g}")
+            self._log(f"Set current capped at max {value:g} A")
         return value
 
     def _on_ramp_current(self) -> None:
@@ -822,7 +946,7 @@ class AmplifierCard(ttk.LabelFrame):
             return
         self._appearance = key
         self._dim_body = dim_body
-        self.configure(style=f"{kind}.TLabelframe")
+        self.configure(style=labelframe_style_name(kind, self._border_color))
         label_style = "Dim.TLabel" if dim_body else "Live.TLabel"
         heading_style = "HeadingDim.TLabel" if dim_body else "Heading.TLabel"
         for lbl in self._labels:
@@ -905,6 +1029,8 @@ def apply_ui_font(root: tk.Misc, size: int) -> None:
     style.configure("Connected.TLabelframe.Label", font=bold, foreground="#1a1a1a")
     style.configure("Disconnected.TLabelframe.Label", font=bold, foreground=COLOR_DIM)
     style.configure("Connecting.TLabelframe.Label", font=bold, foreground="#1a1a1a")
+    for border_color in list(_CARD_BORDER_COLORS):
+        ensure_card_border_styles(root, border_color, font_size=size)
     style.configure("PdOk.TLabel", font=regular, foreground="#1b7f2a")
     style.configure("PdErr.TLabel", font=regular, foreground="#c62828")
     style.configure("PdOkDim.TLabel", font=regular, foreground="#8a9a8a")
@@ -1008,13 +1134,20 @@ class App(tk.Tk):
                 driver_count = clamp_driver_count(
                     entry.get("current drivers", DEFAULT_DRIVERS)
                 )
+                border_color = parse_hex_color(entry.get("color"))
+                max_current = parse_max_current(entry.get("max current"))
                 reader = AmplifierReader(
                     name, port, order=index, driver_count=driver_count
                 )
                 reader.start()
                 self.readers.append(reader)
 
-                card = AmplifierCard(self.flow, reader)
+                card = AmplifierCard(
+                    self.flow,
+                    reader,
+                    border_color=border_color,
+                    max_current=max_current,
+                )
                 self.flow.add(card)
                 self.cards.append(card)
 

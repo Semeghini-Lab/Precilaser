@@ -1,24 +1,59 @@
 {
   "amplifiers": [
     {
-      "name": "420: 1844 nm Pre-Amp",
-      "port": "COM10",
-      "current drivers": 3
+      "name": "302: 1974 nm Pre-AMP",
+      "port": "COM15",
+      "current drivers": 3,
+      "color": "#c999b4"
     },
     {
-      "name": "420: 1844 nm TDFA",
-      "port": "COM9",
-      "current drivers": 3
-    },
-    {
-      "name": "420: 1544 nm EDFA",
-      "port": "COM12",
-      "current drivers": 3
+      "name": "302: 1974 nm TDFA",
+      "port": "COM19",
+      "current drivers": 3,
+      "color": "#c999b4"
     },
     {
       "name": "302: 1555 nm EDFA",
       "port": "COM20",
-      "current drivers": 3
+      "current drivers": 3,
+      "color": "#c999b4"
+    },
+    {
+      "name": "420: 1844 nm Pre-Amp",
+      "port": "COM10",
+      "current drivers": 3,
+      "color": "#847bd4",
+      "max current": 5.9
+    },
+    {
+      "name": "420: 1844 nm TDFA",
+      "port": "COM9",
+      "current drivers": 3,
+      "color": "#847bd4"
+    },
+    {
+      "name": "420: 1544 nm EDFA",
+      "port": "COM12",
+      "current drivers": 3,
+      "color": "#847bd4"
+    },
+    {
+      "name": "578: 1845 nm Pre-AMP",
+      "port": "COM5",
+      "current drivers": 3,
+      "color": "#c7a424"
+    },
+    {
+      "name": "578: 1845 nm TDFA",
+      "port": "COM7",
+      "current drivers": 3,
+      "color": "#c7a424"
+    },
+    {
+      "name": "578: 1550 nm EDFA",
+      "port": "COM6",
+      "current drivers": 3,
+      "color": "#c7a424"
     }
   ]
 }
